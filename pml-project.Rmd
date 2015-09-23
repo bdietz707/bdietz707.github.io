@@ -1,0 +1,154 @@
+---
+title: "PML_Project"
+author: "Brad Dietz"
+date: "Friday, September 22, 2015"
+output: html_document
+---
+
+###Synopsis -
+
+The goal of this project is to to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they exercised. The prediction variable is the "classe" variable in the training set. 
+
+The report should describe how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. Finally, the prediction model will predict the exercise manner of 20 different test cases.
+
+The training set data is: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test set data is: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+More information is available from: http://groupware.les.inf.puc-rio.br/har
+
+###Data Preperation -
+
+Load the Test and Training data:
+```{r, cache=TRUE, echo=TRUE}
+#Load the training and testing data 
+test <- read.csv("pml-testing.csv", header = TRUE, sep=",", check.names=FALSE, stringsAsFactors=FALSE)
+train_full <- read.csv("pml-training.csv", header = TRUE, sep=",", check.names=FALSE, stringsAsFactors=FALSE)
+```
+
+Modify the Training Data:
+```{r, cache=TRUE, echo=TRUE}
+train <- train_full
+
+#Convert Classe into a factor
+train$classe <- as.factor(train$classe)
+
+#Remove the first 7 Columns as they are uncessary for the regressions
+train <- train[,8:160]
+
+#Remove Near Zero Variance Columns
+library(caret)
+RemoveNZV <- nearZeroVar(train)
+train <- train[, -RemoveNZV]
+
+#Remove variables that are almost always NA
+RemoveNA <- sapply(train, function(x) mean(is.na(x))) > 0.95
+train <- train[, RemoveNA==F]
+
+#Break the Training data into Training and Out of Sample Training sets
+#The Out of Sample Training Set serves to minimize overfitting while maximizing accuracy.  OOS Training sets are very helpful when testing multiple regression models against each other.
+set.seed(1977)
+trainIndex = createDataPartition(train$classe, p = 0.75,list=FALSE)
+train_Run = train[trainIndex,]
+train_OOS = train[-trainIndex,]
+```
+
+###Model Building and Selection -
+
+Two Regression Models, Random Forest and Generalized Boosted Modeling, were chosen since they have historically worked well on similar data sets.  The procedure is to run the regressions on a training set and use the resulting model to predict the outcome of the Out of Sample (OOS) Training Set.  The model with a highest OOS prediction accuracy will run a final regression on the FULL training set and use the resulting model to predict the outcome of the test set.
+
+A function named Confusion Matrix function is used to quantify the accuracy of a regression.   In this project, a confusion matrix will be run for each model comparing the predicted Out of Sample classification to the actual Out of Sample Classification.
+
+2 seperate Random Forest Regressions will be run: The Caret package and the Standard package. 
+
+Caret Random Forest Regression with CV:
+```{r, cache=TRUE, echo=TRUE}
+set.seed(1977)
+#Note that the following Caret Random Forest model uses cross validation with 3 folds
+modelFitCaretRF <- train(classe ~.,data=train_Run, method="rf", 
+                  trControl = trainControl(method = "cv", 
+                                           number = 3, 
+                                           allowParallel = TRUE, 
+                                           verboseIter = FALSE))
+#Out of Sample Accuracy
+predictionsCRF <- predict(modelFitCaretRF,newdata=train_OOS)
+    #Extract the model's accuracy from the confusion matrix
+CRF_Accuracy <- confusionMatrix(predictionsCRF,train_OOS$classe)$overall[1]
+paste(round(100*CRF_Accuracy,4),"%", sep="")
+```
+
+Random Forest Regression:
+```{r, cache=TRUE, echo=TRUE}
+library(randomForest)
+set.seed(1977)
+#Note that in Random Forest Regressions, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error as it is estimated internally during the run
+ModelFitRF <- randomForest(classe~.,data=train_Run)
+#Out of Sample Accuracy
+predictionsRF <- predict(ModelFitRF,newdata=train_OOS)
+    #Extract the model's accuracy from the confusion matrix
+RF_Accuracy <- confusionMatrix(predictionsRF,train_OOS$classe)$overall[1]
+paste(round(100*RF_Accuracy,4),"%", sep="")
+```
+
+Generalized Boosted Regression with cv:
+```{r, cache=TRUE, echo=TRUE}
+library(gbm)
+set.seed(1977)
+#Note that the following GBM model uses cross validation with 2 folds
+modelFitGBM <- gbm(classe~.,data=train_Run, distribution = "multinomial", n.trees=1000,shrinkage=0.05, interaction.depth=13, cv.folds=2)
+#gbm.perf is used to determine the optimal number of trees
+ntrees = gbm.perf(modelFitGBM,plot.it=FALSE,method ="cv")
+#The following is the number of trees that optimize the Random Forest
+ntrees
+#Out of Sample Accuracy
+predictionsGBM <- predict.gbm(modelFitGBM,newdata=train_OOS, n.trees = ntrees, type = "response")
+    #Extract the predictions from the model
+predMatrix=as.matrix(predictionsGBM[,,1]) 
+    #Determine the Outcome for each prediction
+predictionGBMout <- (colnames(predMatrix)[apply(predMatrix,1,which.max)])
+    #Extract the model's accuracy from the confusion matrix
+GBM_Accuracy <- confusionMatrix(predictionGBMout,train_OOS$classe)$overall[1]
+paste(round(100*GBM_Accuracy,4),"%", sep="")
+#Full Confusion Matrix
+confusionMatrix(predictionGBMout,train_OOS$classe)
+#Top ten influencial Variables
+relative.influence(modelFitGBM, n.trees = ntrees, scale = TRUE, sort = TRUE)[1:10]
+```
+The Accuracy of the GBM model is higher than the Random Forest model which is higher than the Caret Random Forest model. The remainder of the project will use the GBM model as it has the highest accuracy. 
+
+Out of Sample Error Rate for the GBM Model is
+1 - the Out of Sample Accuracy Rate:
+```{r, cache=FALSE, echo=TRUE}
+paste(round(100*(1-GBM_Accuracy),4),"%", sep="")
+```
+
+###Final Model -
+
+Rerun the GBM regression on the Full Training Dataset and have it predict the outcome of the Test Set:
+```{r, cache=TRUE, echo=TRUE}
+set.seed(1977)
+#Note that the following GBM model uses cross validation with 2 folds
+modelFitGBMfinal <- gbm(classe~.,data=train, distribution = "multinomial", n.trees=1000,shrinkage=0.05, interaction.depth=13, cv.folds=2)
+ntreesfinal = gbm.perf(modelFitGBMfinal, plot.it=FALSE, method ="cv")
+#The following is the number of trees that optimize the Random Forest
+ntreesfinal
+predictionsGBMfinal <- predict.gbm(modelFitGBMfinal,newdata=test, n.trees = ntreesfinal, type = "response")
+predMatrixfinal=as.matrix(predictionsGBMfinal[,,1]) 
+predictionGBMoutfinal <- (colnames(predMatrixfinal)[apply(predMatrixfinal,1,which.max)])
+#The predictions on the test set are
+predictionGBMoutfinal
+```
+
+###Test Set Predictions -
+
+```{r, cache=TRUE, echo=TRUE}
+pml_write_files = function(x) {
+    n = length(x)
+    for (i in 1:n) {
+        filename = paste0("problem_id_", i, ".txt")
+        write.table(x[i], file = filename, quote = FALSE, row.names = FALSE, 
+            col.names = FALSE)
+    }
+}
+pml_write_files(predictionGBMoutfinal)
+```
